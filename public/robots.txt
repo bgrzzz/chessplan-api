@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# Aponte para a rota que criou no passo 1
+Sitemap: https://www.chessplan.com.br/sitemap.xml

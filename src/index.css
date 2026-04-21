@@ -1,0 +1,376 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ChessPlan — index.css (responsivo mobile-first)
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* 1. Reset */
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background: #0e0f11;
+    color: #fff;
+    font-family: 'DM Sans', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+#root {
+    width: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+}
+
+/* 2. Scrollbar premium */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.15) transparent;
+}
+
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.15);
+    border-radius: 8px;
+}
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: rgba(196,167,74,0.8);
+    }
+
+/* 3. Previne zoom no iOS ao focar inputs */
+input, select, textarea {
+    font-size: 16px !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYOUT PRINCIPAL
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Container raiz: sidebar + main */
+.app-shell {
+    display: flex;
+    flex-direction: row;
+    min-height: 100vh;
+    min-height: 100dvh;
+}
+
+.app-main {
+    flex: 1;
+    padding: 28px 36px;
+    overflow-y: auto;
+    min-width: 0;
+}
+
+.app-sidebar {
+    width: 340px;
+    flex-shrink: 0;
+    background: #111;
+    border-left: 1px solid #1e1e1e;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding-bottom: 80px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   HEADER
+   ═══════════════════════════════════════════════════════════════════ */
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.header-inputs {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.header-input {
+    padding: 8px 12px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: white;
+    border-radius: 6px;
+    font-size: 13px;
+    width: 140px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   NAVIGATION TABS
+   ═══════════════════════════════════════════════════════════════════ */
+.nav-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    padding-bottom: 14px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   RATING CARDS ROW
+   ═══════════════════════════════════════════════════════════════════ */
+.rating-cards-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   GAMES + BOARD LAYOUT
+   ═══════════════════════════════════════════════════════════════════ */
+.games-board-row {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+}
+
+.games-list-container {
+    flex: 1;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 12px;
+    padding: 8px;
+    max-height: 55vh;
+    overflow-y: auto;
+    min-width: 0;
+}
+
+.board-container {
+    width: 380px;
+    flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TRAINING PREFS: sliders row
+   ═══════════════════════════════════════════════════════════════════ */
+.training-sliders-row {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.training-slider-box {
+    flex: 1;
+    min-width: 200px;
+    background: rgba(0,0,0,0.2);
+    padding: 16px;
+    border-radius: 12px;
+}
+
+.training-slider-box-wide {
+    flex: 2;
+    min-width: 300px;
+    background: rgba(0,0,0,0.2);
+    padding: 16px;
+    border-radius: 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   HEATMAP grid
+   ═══════════════════════════════════════════════════════════════════ */
+.heatmap-wrapper {
+    display: flex;
+    gap: 12px;
+}
+
+.heatmap-grid-container {
+    flex: 1;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SIDEBAR content
+   ═══════════════════════════════════════════════════════════════════ */
+.sidebar-content {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 16px;
+}
+
+/* Mobile bottom sheet toggle */
+.mobile-sidebar-toggle {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: #111;
+    border-top: 1px solid #2a2a2a;
+    padding: 12px 20px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MOBILE: < 900px (tablets e celulares grandes)
+   ═══════════════════════════════════════════════════════════════════ */
+@media (max-width: 900px) {
+
+    /* Layout vira coluna */
+    .app-shell {
+        flex-direction: column;
+        height: auto;
+        min-height: 100vh;
+        min-height: 100dvh;
+    }
+
+    .app-main {
+        padding: 16px;
+        overflow-y: visible;
+    }
+
+    /* Sidebar vira seção embaixo do main */
+    .app-sidebar {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #1e1e1e;
+    }
+
+    /* Rating cards empilham */
+    .rating-cards-row {
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    /* Games + board empilham: board em cima */
+    .games-board-row {
+        flex-direction: column-reverse;
+        gap: 16px;
+    }
+
+    .board-container {
+        width: 100%;
+        max-width: 500px;
+        margin: 0 auto;
+    }
+
+    .games-list-container {
+        max-height: 40vh;
+    }
+
+    /* Header: inputs ocupam linha inteira */
+    .app-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+
+    .header-inputs {
+        width: 100%;
+    }
+
+    .header-input {
+        flex: 1;
+        width: auto;
+        min-width: 0;
+    }
+
+    /* Nav tabs: scroll horizontal */
+    .nav-tabs {
+        gap: 6px;
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+    }
+
+    /* Training sliders empilham */
+    .training-sliders-row {
+        flex-direction: column;
+    }
+
+    .training-slider-box,
+    .training-slider-box-wide {
+        min-width: 0;
+        flex: none;
+        width: 100%;
+    }
+
+    /* Heatmap: labels menores */
+    .heatmap-wrapper {
+        gap: 6px;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MOBILE: < 480px (celulares pequenos)
+   ═══════════════════════════════════════════════════════════════════ */
+@media (max-width: 480px) {
+
+    .app-main {
+        padding: 12px;
+    }
+
+    /* Header compacto */
+    .header-inputs {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .header-input {
+        width: 100%;
+    }
+
+    /* Board ocupa tela cheia */
+    .board-container {
+        max-width: 100%;
+    }
+
+    /* Nav tabs mais compactos */
+    .nav-tabs button {
+        font-size: 12px !important;
+        padding: 6px 12px !important;
+        white-space: nowrap;
+    }
+
+    /* Sidebar padding menor */
+    .sidebar-content {
+        padding: 16px;
+    }
+
+    /* Quest cards: botão embaixo */
+    .quest-card {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+        .quest-card button {
+            width: 100%;
+        }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ANIMATION
+   ═══════════════════════════════════════════════════════════════════ */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+}

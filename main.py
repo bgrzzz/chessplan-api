@@ -1,67 +1,92 @@
 import os
 import stripe
+import json
+import re
+import secrets
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
 from datetime import datetime, date
+from datetime import timedelta
 from google import genai
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Request, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from typing import Optional
 
 # ═══════════════════════════════════════════════════════════════════
-# CONFIG
+# 1. CONFIGURAÇÃO INICIAL
 # ═══════════════════════════════════════════════════════════════════
 load_dotenv()
-
-# Supabase
-sb_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
-sb_anon = os.environ.get("SUPABASE_ANON_KEY", "")
-sb_service = os.environ.get("SUPABASE_SERVICE_KEY", "")
-
-supabase: Client = None
-supabase_admin: Client = None
-
-if sb_url and sb_anon:
-    supabase = create_client(sb_url, sb_anon)
-if sb_url and sb_service:
-    supabase_admin = create_client(sb_url, sb_service)
-
-# Stripe
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-STRIPE_PRICE_BRL = os.getenv("STRIPE_PRICE_BRL")
-STRIPE_PRICE_USD = os.getenv("STRIPE_PRICE_USD")
-
-# Gemini
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-# App
 app = FastAPI(title="ChessPlan API")
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://chess-plan.vercel.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://chessplan.com.br")
 FREE_AI_LIMIT = 3
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         FRONTEND_URL,
-        "http://localhost:5173",
+        "https://www.chessplan.com.br",
         "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Supabase
+sb_url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+sb_anon = os.environ.get("SUPABASE_ANON_KEY", "")
+sb_service = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+supabase: Client = create_client(sb_url, sb_anon) if sb_url and sb_anon else None
+supabase_admin: Client = create_client(sb_url, sb_service) if sb_url and sb_service else None
+
+# Stripe & Gemini
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_BRL = os.getenv("STRIPE_PRICE_BRL")
+STRIPE_PRICE_USD = os.getenv("STRIPE_PRICE_USD")
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
 # ═══════════════════════════════════════════════════════════════════
-# HELPERS
+# 2. ROTA DO SITEMAP (Antes do Helpers para garantir prioridade)
+# ═══════════════════════════════════════════════════════════════════
+@app.get("/sitemap.xml")
+async def get_sitemap():
+    base_url = "https://www.chessplan.com.br"
+    static_pages = ["/", "/pricing", "/blog", "/rivalry-tracker"]
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>']
+    xml.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+    for page in static_pages:
+        xml.append(f'  <url><loc>{base_url}{page}</loc></url>')
+    if supabase_admin:
+        try:
+            res = supabase_admin.table("posts").select("slug").execute()
+            for post in (res.data or []):
+                if post.get("slug"):
+                    xml.append(f'  <url><loc>{base_url}/blog/{post["slug"]}</loc></url>')
+        except: pass
+    xml.append('</urlset>')
+    return Response(content="\n".join(xml), media_type="application/xml")
+
+# ═══════════════════════════════════════════════════════════════════
+# 3. HELPERS & MODELOS
 # ═══════════════════════════════════════════════════════════════════
 class ChessAnalysisRequest(BaseModel):
     pgn: str
     evaluation: float = 0.0
     player_rating: int = 1200
+
+class OpeningExplorerRequest(BaseModel):
+    fen: str
+    source: str = "masters"
 
 class CheckoutRequest(BaseModel):
     currency: str = "usd"
@@ -72,6 +97,21 @@ class CourseCheckoutRequest(BaseModel):
 class ModuleCompleteRequest(BaseModel):
     quiz_score: int = 0
 
+class ReferralRegisterRequest(BaseModel):
+    referrer_id: str
+
+class ReferralClaimRequest(BaseModel):
+    months: int = 1
+
+class AcademyCreateRequest(BaseModel):
+    name: str
+
+class AcademyInviteRequest(BaseModel):
+    email: str
+    role: str = "student"
+
+class AcademyJoinRequest(BaseModel):
+    token: str
 
 async def get_user(authorization: Optional[str] = None):
     if not authorization or not authorization.startswith("Bearer ") or not supabase:
@@ -81,7 +121,6 @@ async def get_user(authorization: Optional[str] = None):
         return {"id": user.user.id, "email": user.user.email}
     except:
         return None
-
 
 def get_plan(user_id: str) -> dict:
     if not supabase_admin:
@@ -94,6 +133,111 @@ def get_plan(user_id: str) -> dict:
         pass
     return {"plan": "free", "status": "active"}
 
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+def extend_internal_pro(user_id: str, days: int):
+    if not supabase_admin:
+        return None
+
+    now = datetime.utcnow()
+    current = get_plan(user_id)
+    current_end = parse_iso_datetime(current.get("current_period_end"))
+    start = current_end if current_end and current_end > now else now
+    new_end = start + timedelta(days=days)
+
+    payload = {
+        "user_id": user_id,
+        "plan": "pro",
+        "status": "active",
+        "current_period_start": now.isoformat(),
+        "current_period_end": new_end.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+
+    supabase_admin.table("subscriptions").upsert(payload, on_conflict="user_id").execute()
+    return new_end.isoformat()
+
+def grant_referee_bonus(referral):
+    if not supabase_admin or referral.get("referee_bonus_granted") or not referral.get("referee_id"):
+        return
+
+    extend_internal_pro(referral["referee_id"], 7)
+    supabase_admin.table("referrals").update({
+        "referee_bonus_granted": True,
+    }).eq("id", referral["id"]).execute()
+
+def complete_referral_for_user(user_id: str):
+    if not supabase_admin:
+        return False
+
+    try:
+        res = supabase_admin.table("referrals").select("*").eq("referee_id", user_id).eq("status", "registered").limit(1).execute()
+        if not res.data:
+            return False
+
+        referral = res.data[0]
+        now = datetime.utcnow().isoformat()
+
+        if not referral.get("reward_granted"):
+            rewards = supabase_admin.table("referral_rewards").select("credit_months,total_earned").eq("user_id", referral["referrer_id"]).execute()
+            current = rewards.data[0] if rewards.data else {"credit_months": 0, "total_earned": 0}
+            supabase_admin.table("referral_rewards").upsert({
+                "user_id": referral["referrer_id"],
+                "credit_months": int(current.get("credit_months") or 0) + 1,
+                "total_earned": int(current.get("total_earned") or 0) + 1,
+                "updated_at": now,
+            }, on_conflict="user_id").execute()
+
+        supabase_admin.table("referrals").update({
+            "status": "completed",
+            "completed_at": now,
+            "reward_granted": True,
+        }).eq("id", referral["id"]).execute()
+        return True
+    except Exception as e:
+        print(f"Referral complete error: {e}")
+        return False
+
+def is_academy_coach(user_id: str, academy_id: str) -> bool:
+    if not supabase_admin:
+        return False
+    try:
+        academy = supabase_admin.table("academies").select("owner_id").eq("id", academy_id).limit(1).execute()
+        academy_data = academy.data[0] if academy.data else None
+        if academy_data and academy_data.get("owner_id") == user_id:
+            return True
+        member = supabase_admin.table("academy_members").select("role").eq("academy_id", academy_id).eq("user_id", user_id).limit(1).execute()
+        member_data = member.data[0] if member.data else None
+        return member_data and member_data.get("role") == "coach"
+    except Exception:
+        return False
+
+def can_coach_student(coach_id: str, student_id: str) -> bool:
+    if not supabase_admin or coach_id == student_id:
+        return False
+    try:
+        coach_members = supabase_admin.table("academy_members").select("academy_id").eq("user_id", coach_id).eq("role", "coach").execute()
+        academy_ids = [row["academy_id"] for row in (coach_members.data or [])]
+        if not academy_ids:
+            return False
+        student = supabase_admin.table("academy_members").select("academy_id").eq("user_id", student_id).in_("academy_id", academy_ids).limit(1).execute()
+        return bool(student.data)
+    except Exception:
+        return False
+
+def public_profile_map(user_ids):
+    if not supabase_admin or not user_ids:
+        return {}
+    profiles = supabase_admin.table("profiles").select(
+        "id, username, display_name, avatar_url, lichess_username, chesscom_username"
+    ).in_("id", list(set(user_ids))).execute()
+    return {p["id"]: p for p in (profiles.data or [])}
 
 def get_usage(user_id: str) -> int:
     if not supabase_admin:
@@ -106,7 +250,6 @@ def get_usage(user_id: str) -> int:
     except:
         pass
     return 0
-
 
 def bump_usage(user_id: str):
     if not supabase_admin:
@@ -128,10 +271,330 @@ def bump_usage(user_id: str):
     except Exception as e:
         print(f"Usage bump error: {e}")
 
+def parse_cdb_number(value, default=0, as_float=False):
+    cleaned = re.sub(r"[^0-9.\-]", "", str(value or ""))
+    if cleaned in ("", "-", ".", "-."):
+        return default
+    try:
+        return float(cleaned) if as_float else int(float(cleaned))
+    except ValueError:
+        return default
+
+def parse_cdb_moves(raw: str):
+    raw = (raw or "").replace("\x00", "").strip()
+    if not raw or raw.startswith("unknown") or raw.startswith("nobestmove"):
+        return []
+
+    moves = []
+    for part in raw.split("|"):
+        part = part.strip()
+        if not part:
+            continue
+
+        move_data = {}
+        for item in part.split(","):
+            item = item.strip()
+            if ":" in item:
+                k, v = item.split(":", 1)
+                move_data[k.strip()] = v.strip()
+
+        if not move_data.get("move"):
+            continue
+
+        moves.append({
+            "san": move_data["move"],
+            "score": parse_cdb_number(move_data.get("score")),
+            "rank": parse_cdb_number(move_data.get("rank")),
+            "note": move_data.get("note", ""),
+            "winrate": parse_cdb_number(move_data.get("winrate"), 0.0, as_float=True),
+        })
+
+    moves.sort(key=lambda x: (x["score"], x["rank"], x["winrate"]), reverse=True)
+    return moves
+
+# ═══════════════════════════════════════════════════════════════════
+# CHESS CLOUD DATABASE (CDB) EXPLORER
+# ═══════════════════════════════════════════════════════════════════
+@app.post("/cdb-explorer")
+async def cdb_explorer(data: OpeningExplorerRequest):
+    """
+    Consulta o Chess Cloud Database (chessdb.cn) para uma posição FEN.
+    Retorna os lances mais jogados com estatísticas (score, winrate).
+    """
+    fen = data.fen.strip()
+    if not fen:
+        raise HTTPException(status_code=400, detail="FEN é obrigatório")
+
+    params = {"action": "queryall", "board": fen}
+    url = f"https://www.chessdb.cn/cdb.php?{urlencode(params)}"
+
+    request = UrlRequest(
+        url,
+        headers={
+            "Accept": "text/plain",
+            "User-Agent": "ChessPlan/1.0 contact.chessplan@gmail.com",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8", errors="ignore")
+            return {"moves": parse_cdb_moves(raw)[:8]}
+    except HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=e.code, detail=f"CDB error: {body}")
+    except URLError as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao conectar ao CDB: {e.reason}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ═══════════════════════════════════════════════════════════════════
 # ANALYZE (with gating)
 # ═══════════════════════════════════════════════════════════════════
+# REFERRALS
+@app.get("/referral/stats")
+async def referral_stats(authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not supabase_admin:
+        raise HTTPException(status_code=500, detail="DB nao configurado")
+
+    referrals_res = supabase_admin.table("referrals").select(
+        "referee_email, status, completed_at, created_at"
+    ).eq("referrer_id", user["id"]).order("created_at", desc=True).execute()
+    rewards_res = supabase_admin.table("referral_rewards").select(
+        "credit_months,total_earned"
+    ).eq("user_id", user["id"]).execute()
+
+    referrals = referrals_res.data or []
+    rewards = rewards_res.data[0] if rewards_res.data else {}
+
+    return {
+        "referral_code": user["id"],
+        "referral_link": f"{FRONTEND_URL}/?ref={user['id']}",
+        "total_invited": len(referrals),
+        "registered": len([r for r in referrals if r.get("status") in ("registered", "completed")]),
+        "completed": len([r for r in referrals if r.get("status") == "completed"]),
+        "credit_months": int(rewards.get("credit_months") or 0),
+        "total_earned": int(rewards.get("total_earned") or 0),
+        "referrals": referrals,
+    }
+
+@app.post("/referral/register")
+async def referral_register(req: ReferralRegisterRequest, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not supabase_admin:
+        raise HTTPException(status_code=500, detail="DB nao configurado")
+
+    referrer_id = req.referrer_id.strip()
+    if not referrer_id:
+        raise HTTPException(status_code=400, detail="Codigo de indicacao invalido")
+    if referrer_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Voce nao pode usar seu proprio codigo")
+
+    existing = supabase_admin.table("referrals").select("*").eq("referee_id", user["id"]).execute()
+    if existing.data:
+        grant_referee_bonus(existing.data[0])
+        return {"registered": True, "already_registered": True}
+
+    try:
+        payload = {
+            "referrer_id": referrer_id,
+            "referee_email": user.get("email"),
+            "referee_id": user["id"],
+            "status": "registered",
+        }
+        inserted = supabase_admin.table("referrals").insert(payload).execute()
+        if inserted.data:
+            grant_referee_bonus(inserted.data[0])
+        return {"registered": True, "referee_bonus": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Nao foi possivel registrar indicacao: {e}")
+
+@app.post("/referral/complete")
+async def referral_complete(authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    return {"completed": complete_referral_for_user(user["id"])}
+
+@app.post("/referral/claim-credit")
+async def referral_claim_credit(req: ReferralClaimRequest, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not supabase_admin:
+        raise HTTPException(status_code=500, detail="DB nao configurado")
+
+    months = max(1, min(int(req.months or 1), 12))
+    rewards_res = supabase_admin.table("referral_rewards").select("credit_months,total_earned").eq("user_id", user["id"]).execute()
+    rewards = rewards_res.data[0] if rewards_res.data else {"credit_months": 0, "total_earned": 0}
+    available = int(rewards.get("credit_months") or 0)
+    if available < months:
+        raise HTTPException(status_code=400, detail="Voce nao tem creditos suficientes")
+
+    pro_until = extend_internal_pro(user["id"], 30 * months)
+    supabase_admin.table("referral_rewards").upsert({
+        "user_id": user["id"],
+        "credit_months": available - months,
+        "total_earned": int(rewards.get("total_earned") or 0),
+        "updated_at": datetime.utcnow().isoformat(),
+    }, on_conflict="user_id").execute()
+
+    return {"claimed": True, "credit_months": available - months, "pro_until": pro_until}
+
+# ACADEMY
+@app.post("/academies")
+async def create_academy(req: AcademyCreateRequest, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not supabase_admin:
+        raise HTTPException(status_code=500, detail="DB nao configurado")
+
+    name = req.name.strip()
+    if len(name) < 3:
+        raise HTTPException(status_code=400, detail="Nome da academia precisa ter ao menos 3 caracteres")
+
+    academy = supabase_admin.table("academies").insert({
+        "name": name,
+        "owner_id": user["id"],
+    }).execute()
+    academy_data = academy.data[0]
+    supabase_admin.table("academy_members").upsert({
+        "academy_id": academy_data["id"],
+        "user_id": user["id"],
+        "role": "coach",
+    }, on_conflict="academy_id,user_id").execute()
+
+    return {"academy": academy_data}
+
+@app.get("/academies/my")
+async def my_academies(authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not supabase_admin:
+        raise HTTPException(status_code=500, detail="DB nao configurado")
+
+    memberships = supabase_admin.table("academy_members").select("academy_id, role, joined_at").eq("user_id", user["id"]).execute()
+    academy_ids = list({row["academy_id"] for row in (memberships.data or [])})
+
+    owned = supabase_admin.table("academies").select("*").eq("owner_id", user["id"]).execute()
+    for row in (owned.data or []):
+        if row["id"] not in academy_ids:
+            academy_ids.append(row["id"])
+
+    if not academy_ids:
+        return {"academies": []}
+
+    academies_res = supabase_admin.table("academies").select("*").in_("id", academy_ids).order("created_at", desc=True).execute()
+    members_res = supabase_admin.table("academy_members").select("academy_id,user_id,role,joined_at").in_("academy_id", academy_ids).execute()
+    members = members_res.data or []
+    profiles = public_profile_map([m["user_id"] for m in members])
+    role_by_academy = {m["academy_id"]: m["role"] for m in (memberships.data or [])}
+
+    academies = []
+    for academy in (academies_res.data or []):
+        academy_members = []
+        for member in members:
+            if member["academy_id"] != academy["id"]:
+                continue
+            profile = profiles.get(member["user_id"], {})
+            academy_members.append({
+                **member,
+                "profile": profile,
+            })
+        academies.append({
+            **academy,
+            "my_role": "coach" if academy["owner_id"] == user["id"] else role_by_academy.get(academy["id"], "student"),
+            "members": academy_members,
+        })
+
+    return {"academies": academies}
+
+@app.post("/academies/{academy_id}/invite")
+async def invite_to_academy(academy_id: str, req: AcademyInviteRequest, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not is_academy_coach(user["id"], academy_id):
+        raise HTTPException(status_code=403, detail="Apenas coaches podem convidar alunos")
+
+    email = req.email.strip().lower()
+    role = req.role if req.role in ("coach", "student") else "student"
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Email invalido")
+
+    token = secrets.token_urlsafe(24)
+    invite = supabase_admin.table("academy_invites").insert({
+        "academy_id": academy_id,
+        "email": email,
+        "role": role,
+        "token": token,
+    }).execute()
+    invite_data = invite.data[0]
+    invite_link = f"{FRONTEND_URL}/join?token={token}"
+
+    return {"invite": invite_data, "invite_link": invite_link}
+
+@app.post("/academies/join")
+async def join_academy(req: AcademyJoinRequest, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not supabase_admin:
+        raise HTTPException(status_code=500, detail="DB nao configurado")
+
+    token = req.token.strip()
+    invite = supabase_admin.table("academy_invites").select("*").eq("token", token).limit(1).execute()
+    if not invite.data:
+        raise HTTPException(status_code=404, detail="Convite nao encontrado")
+
+    invite_data = invite.data[0]
+    expires_at = parse_iso_datetime(invite_data.get("expires_at"))
+    if invite_data.get("accepted_at"):
+        raise HTTPException(status_code=400, detail="Convite ja foi usado")
+    if expires_at and expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Convite expirado")
+    if invite_data.get("email") and user.get("email") and invite_data["email"].lower() != user["email"].lower():
+        raise HTTPException(status_code=403, detail="Este convite foi enviado para outro email")
+
+    supabase_admin.table("academy_members").upsert({
+        "academy_id": invite_data["academy_id"],
+        "user_id": user["id"],
+        "role": invite_data.get("role") or "student",
+    }, on_conflict="academy_id,user_id").execute()
+    supabase_admin.table("academy_invites").update({
+        "accepted_at": datetime.utcnow().isoformat(),
+    }).eq("id", invite_data["id"]).execute()
+
+    return {"joined": True, "academy_id": invite_data["academy_id"]}
+
+@app.get("/academies/students/{student_id}/overview")
+async def academy_student_overview(student_id: str, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not can_coach_student(user["id"], student_id):
+        raise HTTPException(status_code=403, detail="Voce nao e coach deste aluno")
+
+    games = supabase_admin.table("games").select(
+        "id, platform, opponent, opening, result, played_at, pgn, player_color"
+    ).eq("user_id", student_id).order("played_at", desc=True).limit(50).execute()
+    progress = supabase_admin.table("user_course_progress").select(
+        "course_id, module_id, quiz_score, completed_at"
+    ).eq("user_id", student_id).order("completed_at", desc=True).limit(30).execute()
+
+    return {
+        "can_view": True,
+        "games": games.data or [],
+        "course_progress": progress.data or [],
+    }
+
 SYSTEM_PROMPT = """
 Você é um Treinador de Xadrez nível Grande Mestre, paciente e didático.
 Explique o PORQUÊ de um lance ser bom ou ruim usando conceitos como
@@ -142,13 +605,14 @@ Adapte a linguagem para o rating do jogador. Responda em português brasileiro.
 @app.post("/analyze")
 async def analyze(data: ChessAnalysisRequest, authorization: Optional[str] = Header(None)):
     user = await get_user(authorization)
+    used_before = None
 
-    # Gating
     if user:
         sub = get_plan(user["id"])
         is_pro = sub.get("plan") == "pro" and sub.get("status") == "active"
         if not is_pro:
             used = get_usage(user["id"])
+            used_before = used
             if used >= FREE_AI_LIMIT:
                 return JSONResponse(status_code=403, content={
                     "error": "limit_reached",
@@ -173,16 +637,16 @@ async def analyze(data: ChessAnalysisRequest, authorization: Optional[str] = Hea
             contents=prompt,
         )
 
-        # Incrementa uso se free
         if user:
             sub = get_plan(user["id"])
             if not (sub.get("plan") == "pro" and sub.get("status") == "active"):
                 bump_usage(user["id"])
+            if used_before in (None, 0):
+                complete_referral_for_user(user["id"])
 
         return {"feedback": response.text}
     except Exception as e:
         return {"error": str(e)}
-
 
 # ═══════════════════════════════════════════════════════════════════
 # USER PLAN
@@ -206,7 +670,6 @@ async def user_plan(authorization: Optional[str] = Header(None)):
         "ai_remaining": max(0, FREE_AI_LIMIT - used),
         "ai_used_today": used,
     }
-
 
 # ═══════════════════════════════════════════════════════════════════
 # STRIPE CHECKOUT
@@ -244,7 +707,6 @@ async def create_checkout(req: CheckoutRequest, authorization: Optional[str] = H
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 @app.post("/stripe/create-portal")
 async def create_portal(authorization: Optional[str] = Header(None)):
     user = await get_user(authorization)
@@ -258,7 +720,6 @@ async def create_portal(authorization: Optional[str] = Header(None)):
 
     session = stripe.billing_portal.Session.create(customer=cid, return_url=FRONTEND_URL)
     return {"url": session.url}
-
 
 # ═══════════════════════════════════════════════════════════════════
 # STRIPE WEBHOOK
@@ -283,7 +744,6 @@ async def webhook(request: Request):
         uid = data.get("metadata", {}).get("user_id")
         purchase_type = data.get("metadata", {}).get("type")
 
-        # ── Compra de curso (one-time) ──
         if purchase_type == "course_purchase":
             course_id = data.get("metadata", {}).get("course_id")
             payment_id = data.get("payment_intent") or data.get("id")
@@ -295,8 +755,6 @@ async def webhook(request: Request):
                     "purchased_at": datetime.utcnow().isoformat(),
                 }, on_conflict="user_id,course_id").execute()
                 print(f"[Stripe] User {uid} comprou curso {course_id}")
-
-        # ── Assinatura Pro (subscription) ──
         else:
             sub_id = data.get("subscription")
             cust_id = data.get("customer")
@@ -343,17 +801,14 @@ async def webhook(request: Request):
 
     return {"received": True}
 
-
 # ═══════════════════════════════════════════════════════════════════
 # COURSES — CATÁLOGO
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/courses")
 async def list_courses(authorization: Optional[str] = Header(None)):
-    """Lista todos os cursos publicados com progresso do user se logado."""
     if not supabase_admin:
         raise HTTPException(status_code=500, detail="DB não configurado")
 
-    # Busca cursos publicados
     res = supabase_admin.table("courses").select(
         "id, slug, title, description, difficulty, rating_range, "
         "price_brl, price_usd, thumbnail_url, total_modules, "
@@ -361,29 +816,17 @@ async def list_courses(authorization: Optional[str] = Header(None)):
     ).eq("is_published", True).order("created_at").execute()
 
     courses = res.data or []
-
-    # Se logado, adiciona progresso e acesso
     user = await get_user(authorization)
     if user:
-        # Cursos comprados
-        access_res = supabase_admin.table("user_course_access").select(
-            "course_id"
-        ).eq("user_id", user["id"]).execute()
+        access_res = supabase_admin.table("user_course_access").select("course_id").eq("user_id", user["id"]).execute()
         purchased_ids = {a["course_id"] for a in (access_res.data or [])}
-
-        # Progresso por curso
-        progress_res = supabase_admin.table("user_course_progress").select(
-            "course_id"
-        ).eq("user_id", user["id"]).execute()
+        progress_res = supabase_admin.table("user_course_progress").select("course_id").eq("user_id", user["id"]).execute()
         progress_counts = {}
         for p in (progress_res.data or []):
             cid = p["course_id"]
             progress_counts[cid] = progress_counts.get(cid, 0) + 1
-
-        # Checa se é Pro (desconto)
         plan = get_plan(user["id"])
         is_pro = plan.get("plan") == "pro" and plan.get("status") == "active"
-
         for c in courses:
             c["purchased"] = c["id"] in purchased_ids
             c["completed_modules"] = progress_counts.get(c["id"], 0)
@@ -396,27 +839,21 @@ async def list_courses(authorization: Optional[str] = Header(None)):
 
     return {"courses": courses}
 
-
 @app.get("/courses/{course_id}")
 async def get_course(course_id: str, authorization: Optional[str] = Header(None)):
-    """Detalhes de um curso com lista de módulos e puzzles."""
     if not supabase_admin:
         raise HTTPException(status_code=500, detail="DB não configurado")
 
-    # Busca o curso
     course_res = supabase_admin.table("courses").select("*").eq("id", course_id).execute()
     if not course_res.data:
         raise HTTPException(status_code=404, detail="Curso não encontrado")
     course = course_res.data[0]
 
-    # Busca módulos ordenados
     modules_res = supabase_admin.table("course_modules").select(
-        "id, order_index, title, description, pgn_data, key_concepts, "
-        "estimated_minutes, is_free"
+        "id, order_index, title, description, pgn_data, key_concepts, estimated_minutes, is_free"
     ).eq("course_id", course_id).order("order_index").execute()
     modules = modules_res.data or []
 
-    # Busca puzzles de todos os módulos
     module_ids = [m["id"] for m in modules]
     puzzles_by_module = {}
     if module_ids:
@@ -429,30 +866,18 @@ async def get_course(course_id: str, authorization: Optional[str] = Header(None)
                 puzzles_by_module[mid] = []
             puzzles_by_module[mid].append(p)
 
-    # Verifica acesso do user
     user = await get_user(authorization)
     has_access = False
     completed_modules = set()
-
     if user:
-        # Checa se comprou
-        access_res = supabase_admin.table("user_course_access").select("id").eq(
-            "user_id", user["id"]
-        ).eq("course_id", course_id).execute()
+        access_res = supabase_admin.table("user_course_access").select("id").eq("user_id", user["id"]).eq("course_id", course_id).execute()
         has_access = bool(access_res.data)
-
-        # Progresso
-        progress_res = supabase_admin.table("user_course_progress").select(
-            "module_id, quiz_score, completed_at"
-        ).eq("user_id", user["id"]).eq("course_id", course_id).execute()
+        progress_res = supabase_admin.table("user_course_progress").select("module_id").eq("user_id", user["id"]).eq("course_id", course_id).execute()
         completed_modules = {p["module_id"] for p in (progress_res.data or [])}
 
-    # Monta resposta com gating
     for m in modules:
         m["puzzles"] = puzzles_by_module.get(m["id"], [])
         m["completed"] = m["id"] in completed_modules
-
-        # Gating: se não comprou e não é módulo grátis, esconde o PGN
         if not has_access and not m["is_free"]:
             m["pgn_data"] = None
             m["puzzles"] = []
@@ -467,13 +892,11 @@ async def get_course(course_id: str, authorization: Optional[str] = Header(None)
         "completed_count": len(completed_modules),
     }
 
-
 # ═══════════════════════════════════════════════════════════════════
 # COURSES — COMPRA (one-time payment)
 # ═══════════════════════════════════════════════════════════════════
 @app.post("/courses/{course_id}/purchase")
 async def purchase_course(course_id: str, req: CourseCheckoutRequest, authorization: Optional[str] = Header(None)):
-    """Cria sessão de checkout Stripe para comprar um curso avulso."""
     user = await get_user(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="Faça login para comprar")
@@ -481,28 +904,20 @@ async def purchase_course(course_id: str, req: CourseCheckoutRequest, authorizat
     if not supabase_admin:
         raise HTTPException(status_code=500, detail="DB não configurado")
 
-    # Busca o curso
     course_res = supabase_admin.table("courses").select("*").eq("id", course_id).execute()
     if not course_res.data:
         raise HTTPException(status_code=404, detail="Curso não encontrado")
     course = course_res.data[0]
 
-    # Verifica se já comprou
-    existing = supabase_admin.table("user_course_access").select("id").eq(
-        "user_id", user["id"]
-    ).eq("course_id", course_id).execute()
+    existing = supabase_admin.table("user_course_access").select("id").eq("user_id", user["id"]).eq("course_id", course_id).execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="Você já possui este curso")
 
-    # Seleciona o price do Stripe baseado na moeda
     price_id = course.get("stripe_price_brl") if req.currency == "brl" else course.get("stripe_price_usd")
 
-    # Se não tem Stripe Price configurado, cria um checkout com preço dinâmico
     if not price_id:
         amount = course.get("price_brl") if req.currency == "brl" else course.get("price_usd")
         currency = "brl" if req.currency == "brl" else "usd"
-
-        # Desconto de 30% para Pro
         plan = get_plan(user["id"])
         is_pro = plan.get("plan") == "pro" and plan.get("status") == "active"
         if is_pro:
@@ -536,7 +951,6 @@ async def purchase_course(course_id: str, req: CourseCheckoutRequest, authorizat
         except stripe.error.StripeError as e:
             raise HTTPException(status_code=400, detail=str(e))
     else:
-        # Usa Price ID pré-configurado
         try:
             session = stripe.checkout.Session.create(
                 mode="payment",
@@ -555,13 +969,11 @@ async def purchase_course(course_id: str, req: CourseCheckoutRequest, authorizat
         except stripe.error.StripeError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-
 # ═══════════════════════════════════════════════════════════════════
 # COURSES — PROGRESSO
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/courses/{course_id}/progress")
 async def get_progress(course_id: str, authorization: Optional[str] = Header(None)):
-    """Retorna o progresso detalhado do user num curso."""
     user = await get_user(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="Login necessário")
@@ -569,16 +981,10 @@ async def get_progress(course_id: str, authorization: Optional[str] = Header(Non
     if not supabase_admin:
         raise HTTPException(status_code=500, detail="DB não configurado")
 
-    # Módulos do curso
-    modules_res = supabase_admin.table("course_modules").select(
-        "id, order_index, title"
-    ).eq("course_id", course_id).order("order_index").execute()
+    modules_res = supabase_admin.table("course_modules").select("id, order_index, title").eq("course_id", course_id).order("order_index").execute()
     modules = modules_res.data or []
 
-    # Progresso
-    progress_res = supabase_admin.table("user_course_progress").select(
-        "module_id, quiz_score, completed_at"
-    ).eq("user_id", user["id"]).eq("course_id", course_id).execute()
+    progress_res = supabase_admin.table("user_course_progress").select("module_id, quiz_score, completed_at").eq("user_id", user["id"]).eq("course_id", course_id).execute()
     progress_map = {p["module_id"]: p for p in (progress_res.data or [])}
 
     total = len(modules)
@@ -607,14 +1013,8 @@ async def get_progress(course_id: str, authorization: Optional[str] = Header(Non
         "modules": module_progress,
     }
 
-
 @app.post("/courses/{course_id}/modules/{module_id}/complete")
-async def complete_module(
-    course_id: str, module_id: str,
-    req: ModuleCompleteRequest,
-    authorization: Optional[str] = Header(None)
-):
-    """Marca um módulo como concluído com score do quiz."""
+async def complete_module(course_id: str, module_id: str, req: ModuleCompleteRequest, authorization: Optional[str] = Header(None)):
     user = await get_user(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="Login necessário")
@@ -622,24 +1022,17 @@ async def complete_module(
     if not supabase_admin:
         raise HTTPException(status_code=500, detail="DB não configurado")
 
-    # Verifica se o módulo pertence ao curso
-    mod_res = supabase_admin.table("course_modules").select("id, is_free").eq(
-        "id", module_id
-    ).eq("course_id", course_id).execute()
+    mod_res = supabase_admin.table("course_modules").select("id, is_free").eq("id", module_id).eq("course_id", course_id).execute()
     if not mod_res.data:
         raise HTTPException(status_code=404, detail="Módulo não encontrado")
 
     module = mod_res.data[0]
 
-    # Verifica acesso (comprou ou é módulo grátis)
     if not module["is_free"]:
-        access_res = supabase_admin.table("user_course_access").select("id").eq(
-            "user_id", user["id"]
-        ).eq("course_id", course_id).execute()
+        access_res = supabase_admin.table("user_course_access").select("id").eq("user_id", user["id"]).eq("course_id", course_id).execute()
         if not access_res.data:
             raise HTTPException(status_code=403, detail="Compre o curso para acessar este módulo")
 
-    # Upsert progresso
     supabase_admin.table("user_course_progress").upsert({
         "user_id": user["id"],
         "module_id": module_id,
@@ -649,7 +1042,6 @@ async def complete_module(
     }, on_conflict="user_id,module_id").execute()
 
     return {"completed": True, "module_id": module_id, "quiz_score": req.quiz_score}
-
 
 # ═══════════════════════════════════════════════════════════════════
 # HEALTH
@@ -662,3 +1054,5 @@ async def health():
         "gemini": bool(os.getenv("GEMINI_API_KEY")),
         "supabase": bool(supabase_admin),
     }
+
+app.mount("/", StaticFiles(directory="dist", html=True), name="static")

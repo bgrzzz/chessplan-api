@@ -83,11 +83,11 @@ async def get_sitemap():
 
 @app.post("/scan-board")
 async def scan_board(file: UploadFile = File(...)):
-    # 1. Ler a imagem e converter para base64
+    # 1. Ler a imagem
     image_data = await file.read()
     
-    # 2. Configurar o Gemini Vision
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    import base64
+    b64_image = base64.standard_b64encode(image_data).decode("utf-8")
     
     prompt = """
     Analise esta imagem de um tabuleiro de xadrez real. 
@@ -98,16 +98,24 @@ async def scan_board(file: UploadFile = File(...)):
     - Retorne apenas a string FEN, nada mais.
     """
     
-    # 3. Enviar para o Gemini
-    response = model.generate_content([
-        prompt,
-        {"mime_type": "image/jpeg", "data": image_data}
-    ])
-    
-    fen = response.text.strip()
-    
-    # Retorna o FEN para o frontend
-    return {"fen": fen}
+    # 2. Enviar para o Gemini usando a API nova (google-genai Client)
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": file.content_type or "image/jpeg", "data": b64_image}},
+                    ],
+                }
+            ],
+        )
+        fen = response.text.strip()
+        return {"fen": fen}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao analisar imagem: {str(e)}")
 
 class ChessAnalysisRequest(BaseModel):
     pgn: str

@@ -1,7 +1,10 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-python-dotenv==1.0.1
-supabase
-pydantic==2.9.0
-stripe==11.4.1
+fastapi
+uvicorn
+python-dotenv
 google-genai
+supabase
+stripe
+fastapi
+uvicorn
+google-generativeai
+python-multipart

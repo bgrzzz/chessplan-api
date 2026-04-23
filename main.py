@@ -239,6 +239,60 @@ def public_profile_map(user_ids):
     ).in_("id", list(set(user_ids))).execute()
     return {p["id"]: p for p in (profiles.data or [])}
 
+def pgn_to_moves(pgn: str):
+    if not pgn:
+        return []
+    text = re.sub(r"\[[^\]]*\]", " ", pgn)
+    text = re.sub(r"\{[^}]*\}", " ", text)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"\d+\.(\.\.)?", " ", text)
+    text = re.sub(r"\b(1-0|0-1|1/2-1/2|\*)\b", " ", text)
+    return [move for move in text.split() if move and "$" not in move]
+
+def extract_loss_squares(moves, player_color):
+    losses = []
+    for index, move in enumerate(moves):
+        if "x" not in move:
+            continue
+        clean = re.sub(r"[+#!?]", "", move)
+        match = re.search(r"x([a-h][1-8])", clean)
+        if not match:
+            continue
+
+        square = match.group(1)
+        next_move = moves[index + 1] if index + 1 < len(moves) else ""
+        is_trade = False
+        if "x" in next_move:
+            next_clean = re.sub(r"[+#!?]", "", next_move)
+            next_match = re.search(r"x([a-h][1-8])", next_clean)
+            is_trade = bool(next_match and next_match.group(1) == square)
+        if is_trade:
+            continue
+
+        is_white_move = index % 2 == 0
+        is_player_move = (player_color == "white" and is_white_move) or (player_color == "black" and not is_white_move)
+        if not is_player_move:
+            losses.append(square)
+    return losses
+
+def build_empty_square_map():
+    return {f"{chr(97 + file)}{rank}": 0 for rank in range(1, 9) for file in range(8)}
+
+def build_academy_heatmap(games):
+    heatmap = build_empty_square_map()
+    for game in games:
+        moves = pgn_to_moves(game.get("pgn", ""))
+        player_color = game.get("player_color") or "white"
+        for square in extract_loss_squares(moves, player_color):
+            if square in heatmap:
+                heatmap[square] += 1
+    top_squares = [
+        {"square": square, "count": count}
+        for square, count in sorted(heatmap.items(), key=lambda item: item[1], reverse=True)
+        if count > 0
+    ][:5]
+    return heatmap, top_squares
+
 def get_usage(user_id: str) -> int:
     if not supabase_admin:
         return 0
@@ -593,6 +647,112 @@ async def academy_student_overview(student_id: str, authorization: Optional[str]
         "can_view": True,
         "games": games.data or [],
         "course_progress": progress.data or [],
+    }
+
+@app.get("/academies/{academy_id}/aggregated-heatmap")
+async def academy_aggregated_heatmap(academy_id: str, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not is_academy_coach(user["id"], academy_id):
+        raise HTTPException(status_code=403, detail="Apenas coaches podem ver o heatmap da turma")
+
+    members = supabase_admin.table("academy_members").select("user_id").eq("academy_id", academy_id).eq("role", "student").execute()
+    student_ids = [member["user_id"] for member in (members.data or [])]
+    if not student_ids:
+        return {"heatmap": build_empty_square_map(), "top_squares": [], "games_count": 0}
+
+    games = supabase_admin.table("games").select("id, user_id, pgn, player_color").in_("user_id", student_ids).limit(500).execute()
+    heatmap, top_squares = build_academy_heatmap(games.data or [])
+
+    return {
+        "heatmap": heatmap,
+        "top_squares": top_squares,
+        "games_count": len(games.data or []),
+    }
+
+@app.get("/academies/{academy_id}/dashboard")
+async def academy_dashboard(academy_id: str, authorization: Optional[str] = Header(None)):
+    user = await get_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login necessario")
+    if not is_academy_coach(user["id"], academy_id):
+        raise HTTPException(status_code=403, detail="Apenas coaches podem ver o dashboard da turma")
+
+    members = supabase_admin.table("academy_members").select("user_id, role").eq("academy_id", academy_id).execute()
+    student_ids = [member["user_id"] for member in (members.data or []) if member.get("role") == "student"]
+    profiles = public_profile_map(student_ids)
+    if not student_ids:
+        return {
+            "students_count": 0,
+            "games_count": 0,
+            "problem_openings": [],
+            "ranking": [],
+            "connected_accounts": 0,
+        }
+
+    games_res = supabase_admin.table("games").select(
+        "id, user_id, opening, result, pgn, player_color"
+    ).in_("user_id", student_ids).limit(1000).execute()
+    games = games_res.data or []
+
+    openings = {}
+    ranking = {}
+    for student_id in student_ids:
+        ranking[student_id] = {"user_id": student_id, "games": 0, "wins": 0, "losses": 0, "draws": 0}
+
+    for game in games:
+        student_rank = ranking.setdefault(game["user_id"], {"user_id": game["user_id"], "games": 0, "wins": 0, "losses": 0, "draws": 0})
+        student_rank["games"] += 1
+        result = game.get("result")
+        if result == "win":
+            student_rank["wins"] += 1
+        elif result == "loss":
+            student_rank["losses"] += 1
+        else:
+            student_rank["draws"] += 1
+
+        opening = game.get("opening") or "Abertura desconhecida"
+        opening_stats = openings.setdefault(opening, {"opening": opening, "games": 0, "wins": 0, "losses": 0, "draws": 0})
+        opening_stats["games"] += 1
+        if result == "win":
+            opening_stats["wins"] += 1
+        elif result == "loss":
+            opening_stats["losses"] += 1
+        else:
+            opening_stats["draws"] += 1
+
+    problem_openings = []
+    for stats in openings.values():
+        if stats["games"] < 2:
+            continue
+        winrate = round((stats["wins"] / stats["games"]) * 100)
+        problem_openings.append({**stats, "winrate": winrate})
+    problem_openings.sort(key=lambda item: (item["winrate"], -item["games"]))
+
+    ranking_items = []
+    for item in ranking.values():
+        games_count = item["games"]
+        winrate = round((item["wins"] / games_count) * 100) if games_count else 0
+        profile = profiles.get(item["user_id"], {})
+        ranking_items.append({
+            **item,
+            "winrate": winrate,
+            "profile": profile,
+        })
+    ranking_items.sort(key=lambda item: (item["winrate"], item["games"]), reverse=True)
+
+    connected_accounts = len([
+        profile for profile in profiles.values()
+        if profile.get("lichess_username") or profile.get("chesscom_username")
+    ])
+
+    return {
+        "students_count": len(student_ids),
+        "games_count": len(games),
+        "connected_accounts": connected_accounts,
+        "problem_openings": problem_openings[:3],
+        "ranking": ranking_items[:10],
     }
 
 SYSTEM_PROMPT = """

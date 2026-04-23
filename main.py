@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from datetime import datetime, date
 from datetime import timedelta
 from google import genai
-from fastapi import FastAPI, HTTPException, Request, Header, Response
+from fastapi import FastAPI, HTTPException, Request, Header, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -79,6 +79,35 @@ async def get_sitemap():
 # ═══════════════════════════════════════════════════════════════════
 # 3. HELPERS & MODELOS
 # ═══════════════════════════════════════════════════════════════════
+
+@app.post("/scan-board")
+async def scan_board(file: UploadFile = File(...)):
+    # 1. Ler a imagem e converter para base64
+    image_data = await file.read()
+    
+    # 2. Configurar o Gemini Vision
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = """
+    Analise esta imagem de um tabuleiro de xadrez real. 
+    Sua tarefa é identificar a posição exata de cada peça e retornar APENAS a notação FEN (Forsyth-Edwards Notation).
+    Considere:
+    - Quem deve jogar (se não souber, assuma 'w' para brancas).
+    - Roque e capturas en passant (se não souber, use os padrões '-').
+    - Retorne apenas a string FEN, nada mais.
+    """
+    
+    # 3. Enviar para o Gemini
+    response = model.generate_content([
+        prompt,
+        {"mime_type": "image/jpeg", "data": image_data}
+    ])
+    
+    fen = response.text.strip()
+    
+    # Retorna o FEN para o frontend
+    return {"fen": fen}
+
 class ChessAnalysisRequest(BaseModel):
     pgn: str
     evaluation: float = 0.0
